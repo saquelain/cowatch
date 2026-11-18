@@ -9,6 +9,8 @@ data class FloatingReaction(val id: Long, val emoji: String, val fromMe: Boolean
 data class SessionUiState(
     val phase: Phase = Phase.IDLE,
     val isHost: Boolean = false,
+    /** The sync channel to the partner is open (play/pause/chat can flow). */
+    val syncReady: Boolean = false,
     val code: String? = null,
     val codeExpiresAtMs: Long? = null,
     val endedReason: String? = null,

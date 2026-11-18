@@ -51,7 +51,7 @@ class ScreenshotTest {
     }
 
     private val connected = SessionUiState(
-        phase = Phase.CONNECTED, partnerName = "Sam", partnerCameraOn = true, partnerMicOn = true,
+        phase = Phase.CONNECTED, syncReady = true, partnerName = "Sam", partnerCameraOn = true, partnerMicOn = true,
         hasRemoteVideo = true, hasLocalVideo = true,
     )
 
@@ -70,8 +70,8 @@ class ScreenshotTest {
     }
 
     @Composable
-    private fun Watch(state: SessionUiState, settings: AppSettings = AppSettings(), chat: Boolean = false, react: Boolean = false) =
-        WatchScreen(state, settings, WatchActions(), fakePlayer, fakePartner, fakeSelf, chat, react)
+    private fun Watch(state: SessionUiState, settings: AppSettings = AppSettings(), chat: Boolean = false, react: Boolean = false, sourceMenu: Boolean = false) =
+        WatchScreen(state, settings, WatchActions(), fakePlayer, fakePartner, fakeSelf, chat, react, sourceMenu)
 
     @Test fun home() = shot("01_home") {
         HomeScreen(AppSettings(), error = null, onHost = {}, onJoin = {}, onOpenSettings = {})
@@ -128,6 +128,19 @@ class ScreenshotTest {
 
     @Test fun settingsDependencies() = shot("13_settings_sync_off") {
         SettingsScreen(AppSettings().with(Feature.PLAYBACK_SYNC, false).with(Feature.VIDEO_CALL, false), onToggle = { _, _ -> }, onUpdate = {}, onReset = {}, onBack = {})
+    }
+
+    @Test fun changeVideo() = shot("15_watch_change_video") {
+        Watch(connected.copy(movieTitle = "Big Buck Bunny", positionMs = 754_000, durationMs = 1_192_000), sourceMenu = true)
+    }
+
+    @Test fun streamingBuffering() = shot("16_watch_streaming_buffering") {
+        Watch(connected.copy(movieTitle = "Our Holiday.mp4", isBuffering = true, isPlaying = true, positionMs = 61_000, durationMs = 1_800_000,
+            toast = "Playing “Our Holiday.mp4” from Sam's phone"))
+    }
+
+    @Test fun linkingUp() = shot("17_watch_linking_up") {
+        Watch(connected.copy(syncReady = false))
     }
 
     @Test fun ended() = shot("14_ended") {

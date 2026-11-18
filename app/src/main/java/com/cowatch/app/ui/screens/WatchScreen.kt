@@ -51,12 +51,15 @@ import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay10
+import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VideocamOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -107,6 +110,7 @@ class WatchActions(
     val onOpenLink: (url: String) -> Unit = {},
     val onPickFile: () -> Unit = {},
     val onDismissPartnerFile: () -> Unit = {},
+    val onCloseMovie: () -> Unit = {},
     val onToggleMic: () -> Unit = {},
     val onToggleCamera: () -> Unit = {},
     val onSwitchCamera: () -> Unit = {},
@@ -127,7 +131,9 @@ fun WatchScreen(
     selfVideo: @Composable (Modifier) -> Unit,
     initialChatOpen: Boolean = false,
     initialReactOpen: Boolean = false,
+    initialSourceMenuOpen: Boolean = false,
 ) {
+    var sourceMenu by rememberSaveable { mutableStateOf(initialSourceMenuOpen) }
     var chatOpen by rememberSaveable { mutableStateOf(initialChatOpen) }
     var reactOpen by rememberSaveable { mutableStateOf(initialReactOpen) }
     var linkDialog by rememberSaveable { mutableStateOf(false) }
@@ -140,7 +146,10 @@ fun WatchScreen(
     BoxWithConstraints(Modifier.fillMaxSize().background(Color.Black)) {
         val landscape = maxWidth > maxHeight
         val playerArea: @Composable (Modifier) -> Unit = { m ->
-            PlayerArea(state, settings, actions, player, onOpenLinkDialog = { linkDialog = true }, modifier = m)
+            PlayerArea(
+                state, settings, actions, player,
+                onOpenLinkDialog = { linkDialog = true }, onChangeVideo = { sourceMenu = true }, modifier = m,
+            )
         }
         val callBar: @Composable (Modifier) -> Unit = { m ->
             CallControls(
@@ -196,7 +205,8 @@ fun WatchScreen(
 
         AnimatedVisibility(
             state.toast != null, enter = fadeIn(), exit = fadeOut(),
-            modifier = Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 56.dp),
+            // Bottom, above the call buttons, so it never covers the player's controls.
+            modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 84.dp, start = 16.dp, end = 16.dp),
         ) {
             Text(
                 state.toast.orEmpty(),
@@ -207,6 +217,14 @@ fun WatchScreen(
     }
 
     if (linkDialog) OpenLinkDialog(onDismiss = { linkDialog = false }, onOpen = { actions.onOpenLink(it); linkDialog = false })
+    if (sourceMenu) ChangeVideoDialog(
+        settings = settings,
+        onDismiss = { sourceMenu = false },
+        onLink = { sourceMenu = false; linkDialog = true },
+        onFile = { sourceMenu = false; actions.onPickFile() },
+        onSample = { sourceMenu = false; actions.onOpenLink(SAMPLE_URL) },
+        onStop = { sourceMenu = false; actions.onCloseMovie() },
+    )
 }
 
 @Composable
@@ -215,9 +233,9 @@ private fun key(id: Long, content: @Composable () -> Unit) = androidx.compose.ru
 @Composable
 private fun TopStrip(state: SessionUiState) {
     Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-        Box(Modifier.size(8.dp).clip(CircleShape).background(Mint))
+        Box(Modifier.size(8.dp).clip(CircleShape).background(if (state.syncReady) Mint else Color(0xFFFFB84D)))
         Text(
-            "  Watching with ${state.partnerName}",
+            if (state.syncReady) "  Watching with ${state.partnerName}" else "  Linking up with ${state.partnerName}…",
             style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f),
             maxLines = 1, overflow = TextOverflow.Ellipsis,
         )
@@ -232,6 +250,7 @@ private fun PlayerArea(
     actions: WatchActions,
     player: @Composable (Modifier) -> Unit,
     onOpenLinkDialog: () -> Unit,
+    onChangeVideo: () -> Unit,
     modifier: Modifier,
 ) {
     var controlsVisible by remember { mutableStateOf(true) }
@@ -243,8 +262,8 @@ private fun PlayerArea(
             EmptyPlayer(state, settings, actions, onOpenLinkDialog)
         } else {
             player(Modifier.fillMaxSize())
-            if (!state.isPlaying || controlsVisible) {
-                PlaybackOverlay(state, actions, Modifier.fillMaxSize())
+            if (!state.isPlaying || controlsVisible || state.isBuffering) {
+                PlaybackOverlay(state, actions, onChangeVideo, Modifier.fillMaxSize())
             }
         }
         state.partnerLocalFile?.let { title ->
@@ -287,16 +306,26 @@ private fun EmptyPlayer(state: SessionUiState, settings: AppSettings, actions: W
 private val EmptyGradient = androidx.compose.ui.graphics.Brush.verticalGradient(listOf(Color(0xFF3B2470), Color(0xFF1E1730)))
 
 @Composable
-private fun PlaybackOverlay(state: SessionUiState, actions: WatchActions, modifier: Modifier) {
+private fun PlaybackOverlay(state: SessionUiState, actions: WatchActions, onChangeVideo: () -> Unit, modifier: Modifier) {
     var dragging by remember { mutableStateOf(false) }
     var dragValue by remember { mutableFloatStateOf(0f) }
     Box(modifier.background(Color.Black.copy(alpha = 0.35f))) {
+        Row(
+            Modifier.align(Alignment.TopEnd).padding(6.dp).clip(CircleShape)
+                .background(Color.Black.copy(alpha = 0.55f)).clickable(onClick = onChangeVideo)
+                .padding(horizontal = 12.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(Icons.Filled.VideoLibrary, null, tint = Color.White, modifier = Modifier.size(16.dp))
+            Text(" Change video", color = Color.White, style = MaterialTheme.typography.labelMedium)
+        }
         Row(Modifier.align(Alignment.Center), horizontalArrangement = Arrangement.spacedBy(20.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = { actions.onSkip(-10_000) }) { Icon(Icons.Filled.Replay10, "Back 10s", tint = Color.White, modifier = Modifier.size(32.dp)) }
             Box(
                 Modifier.size(60.dp).clip(CircleShape).background(Color.White.copy(alpha = 0.92f)).clickable { actions.onTogglePlay() },
                 contentAlignment = Alignment.Center,
             ) {
+                if (state.isBuffering) CircularProgressIndicator(Modifier.size(60.dp), color = MaterialTheme.colorScheme.primary, strokeWidth = 3.dp)
                 Icon(if (state.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow, if (state.isPlaying) "Pause" else "Play",
                     tint = Color.Black, modifier = Modifier.size(36.dp))
             }
@@ -481,6 +510,46 @@ private fun ChatSheet(lines: List<ChatLine>, partnerName: String, onSend: (Strin
                 Icon(Icons.AutoMirrored.Filled.Send, "Send", tint = MaterialTheme.colorScheme.primary)
             }
         }
+    }
+}
+
+@Composable
+private fun ChangeVideoDialog(
+    settings: AppSettings,
+    onDismiss: () -> Unit,
+    onLink: () -> Unit,
+    onFile: () -> Unit,
+    onSample: () -> Unit,
+    onStop: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Change video") },
+        text = {
+            Column {
+                Text(
+                    if (settings.enabled(Feature.PLAYBACK_SYNC)) "Your partner switches to it too." else "Playback sync is off, so only your phone changes.",
+                    color = Muted, style = MaterialTheme.typography.bodySmall,
+                )
+                Spacer(Modifier.height(8.dp))
+                SourceOption(Icons.Filled.Link, "Open a link", onLink)
+                SourceOption(Icons.Filled.FolderOpen, "Pick a video from this phone", onFile)
+                SourceOption(Icons.Filled.Movie, "Play the sample movie", onSample)
+                SourceOption(Icons.Filled.Stop, "Stop video", onStop)
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+@Composable
+private fun SourceOption(icon: ImageVector, label: String, onClick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable(onClick = onClick).padding(vertical = 12.dp, horizontal = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(icon, null, tint = MaterialTheme.colorScheme.primary)
+        Text("   $label")
     }
 }
 

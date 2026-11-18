@@ -20,6 +20,7 @@ enum class Feature(
     PLAYBACK_SYNC("Playback sync", "Play, pause and seek together with your partner.", true, Section.WATCH),
     DRIFT_CORRECTION("Auto re-sync", "Quietly nudges playback back in sync if you drift apart.", true, Section.WATCH),
     SHARE_LINKS("Auto-share video links", "When you open a link, your partner's app opens it too.", true, Section.WATCH),
+    STREAM_FILES("Stream my videos to partner", "Videos from your phone play on your partner's phone too, sent over your call.", true, Section.WATCH),
     KEEP_SCREEN_ON("Keep screen on", "Stop the screen from sleeping during a movie.", true, Section.WATCH),
 
     TEXT_CHAT("Text chat", "Send messages without pausing the movie.", true, Section.FUN),
@@ -53,7 +54,7 @@ data class AppSettings(
     /** Features whose parent is off are effectively off too. */
     fun enabled(feature: Feature): Boolean = when (feature) {
         Feature.SELF_PREVIEW -> isOn(feature) && isOn(Feature.VIDEO_CALL)
-        Feature.DRIFT_CORRECTION, Feature.SHARE_LINKS -> isOn(feature) && isOn(Feature.PLAYBACK_SYNC)
+        Feature.DRIFT_CORRECTION, Feature.SHARE_LINKS, Feature.STREAM_FILES -> isOn(feature) && isOn(Feature.PLAYBACK_SYNC)
         Feature.SPEAKERPHONE -> isOn(feature) && isOn(Feature.VOICE_CHAT)
         else -> isOn(feature)
     }

@@ -10,9 +10,22 @@ sealed interface SyncMessage {
     @Serializable @SerialName("hello")
     data class Hello(val name: String, val features: List<String>) : SyncMessage
 
-    /** A movie was opened. [url] is null for local files: the partner picks their own copy. */
+    /**
+     * A movie was opened. [url] is set for web links. For a file on the phone,
+     * [streamId]/[size] are set when the sender streams it to the partner;
+     * if both are null the partner has to pick their own copy.
+     */
     @Serializable @SerialName("load")
-    data class Load(val title: String, val url: String?) : SyncMessage
+    data class Load(
+        val title: String,
+        val url: String?,
+        val streamId: String? = null,
+        val size: Long? = null,
+    ) : SyncMessage
+
+    /** The movie was closed ("Stop video"). */
+    @Serializable @SerialName("unload")
+    data object Unload : SyncMessage
 
     @Serializable @SerialName("play")
     data class Play(val positionMs: Long) : SyncMessage

@@ -14,8 +14,9 @@ on a video call while you watch.
 2. **P2** types the code and taps *Join partner*.
 3. The phones connect **directly** (WebRTC, peer-to-peer). The code is burned the moment P2 joins
    and expires after 10 minutes if nobody uses it.
-4. Open a movie: paste a video link (it opens on both phones automatically) or pick a local file
-   (your partner gets a prompt to pick their own copy). Play / pause / seek are mirrored on both phones,
+4. Open a movie: paste a video link (it opens on both phones automatically) or pick a video from
+   your phone — it is **streamed to your partner's phone over the call**, with seeking. Use
+   **Change video** on the player to switch or stop. Play / pause / seek are mirrored on both phones,
    and the host's position is used to quietly correct drift.
 5. Video call, mic/camera toggles, text chat and floating emoji reactions all ride along.
 
@@ -31,7 +32,7 @@ Every feature has its own on/off switch in **Settings** (generated from `Feature
 | Feature | Default |
 |---|---|
 | Video call · Voice chat · Show my camera preview · Speakerphone · Lower movie volume during call | on |
-| Playback sync · Auto re-sync · Auto-share video links · Keep screen on | on |
+| Playback sync · Auto re-sync · Auto-share video links · Stream my videos to partner · Keep screen on | on |
 | Text chat · Emoji reactions · Vibrate on partner activity | on |
 | Codes expire after 10 minutes | on |
 
@@ -58,3 +59,5 @@ Screenshots in `screenshots/` are re-rendered and reviewed before each push.
 - The call runs while the app is open; there's no background/PiP mode yet.
 - Streaming-service apps (Netflix etc.) can't be embedded — use direct video links or local files.
 - Movie audio and voice share the phone speaker; headphones give the best experience.
+- Streaming a phone video to your partner needs upload speed above the video's bitrate; on a slow
+  connection it will pause to buffer.

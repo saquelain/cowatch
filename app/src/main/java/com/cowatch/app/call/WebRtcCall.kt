@@ -1,7 +1,6 @@
 package com.cowatch.app.call
 
 import android.content.Context
-import android.util.Log
 import com.cowatch.app.settings.AppSettings
 import kotlinx.coroutines.suspendCancellableCoroutine
 import org.webrtc.AudioTrack
@@ -40,6 +39,8 @@ class WebRtcCall(
         fun onConnectionChange(state: PeerConnection.PeerConnectionState)
         fun onDataOpen()
         fun onDataMessage(text: String)
+        /** Messages on the file-streaming channel: text = requests, binary = data. */
+        fun onFileMessage(buffer: ByteBuffer, binary: Boolean)
         fun onRemoteVideo(track: VideoTrack?)
         fun onLocalVideo(track: VideoTrack?)
     }
@@ -48,6 +49,7 @@ class WebRtcCall(
     private val factory = RtcEnvironment.factory(appContext)
     private var peer: PeerConnection? = null
     private var dataChannel: DataChannel? = null
+    private var fileChannel: DataChannel? = null
     private var capturer: CameraVideoCapturer? = null
     private var textureHelper: SurfaceTextureHelper? = null
     private var videoSource: VideoSource? = null
@@ -97,8 +99,10 @@ class WebRtcCall(
         val pc = requireNotNull(peer)
         attachTrack(pc, localAudio, MediaStreamTrack.MediaType.MEDIA_TYPE_AUDIO)
         attachTrack(pc, localVideo, MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO)
-        dataChannel = pc.createDataChannel("cowatch", DataChannel.Init().apply { ordered = true })
+        dataChannel = pc.createDataChannel(SYNC_LABEL, DataChannel.Init().apply { ordered = true })
             .also { registerDataChannel(it) }
+        fileChannel = pc.createDataChannel(FILE_LABEL, DataChannel.Init().apply { ordered = true })
+            .also { registerFileChannel(it) }
         val offer = pc.awaitSdp { obs -> pc.createOffer(obs, MediaConstraints()) }
         pc.awaitSet { obs -> pc.setLocalDescription(obs, offer) }
         return offer
@@ -165,6 +169,21 @@ class WebRtcCall(
         return dc.send(DataChannel.Buffer(ByteBuffer.wrap(text.toByteArray(Charsets.UTF_8)), false))
     }
 
+    fun sendFileText(text: String): Boolean {
+        val dc = fileChannel ?: return false
+        if (dc.state() != DataChannel.State.OPEN) return false
+        return dc.send(DataChannel.Buffer(ByteBuffer.wrap(text.toByteArray(Charsets.UTF_8)), false))
+    }
+
+    fun sendFileBinary(data: ByteBuffer): Boolean {
+        val dc = fileChannel ?: return false
+        if (dc.state() != DataChannel.State.OPEN) return false
+        return dc.send(DataChannel.Buffer(data, true))
+    }
+
+    /** Bytes queued on the file channel but not yet sent; used for back-pressure. */
+    fun fileBufferedAmount(): Long = fileChannel?.bufferedAmount() ?: 0
+
     val hasCamera: Boolean get() = localVideo != null
     val hasMic: Boolean get() = localAudio != null
 
@@ -180,6 +199,8 @@ class WebRtcCall(
 
     fun close() {
         runCatching { dataChannel?.unregisterObserver(); dataChannel?.close() }
+        runCatching { fileChannel?.unregisterObserver(); fileChannel?.close() }
+        fileChannel = null
         runCatching { capturer?.stopCapture() }
         capturer?.dispose()
         peer?.dispose()
@@ -207,11 +228,29 @@ class WebRtcCall(
         })
     }
 
+    private fun registerFileChannel(dc: DataChannel) {
+        dc.registerObserver(object : DataChannel.Observer {
+            override fun onBufferedAmountChange(previousAmount: Long) = Unit
+            override fun onStateChange() = Unit
+            override fun onMessage(buffer: DataChannel.Buffer) {
+                // Copy: the buffer is only valid during this callback.
+                val copy = ByteBuffer.allocate(buffer.data.remaining())
+                copy.put(buffer.data).flip()
+                events.onFileMessage(copy, buffer.binary)
+            }
+        })
+    }
+
     private val observer = object : PeerConnection.Observer {
         override fun onIceCandidate(candidate: IceCandidate) = events.onIceCandidate(candidate)
         override fun onConnectionChange(newState: PeerConnection.PeerConnectionState) =
             events.onConnectionChange(newState)
         override fun onDataChannel(dc: DataChannel) {
+            if (dc.label() == FILE_LABEL) {
+                fileChannel = dc
+                registerFileChannel(dc)
+                return
+            }
             dataChannel = dc
             registerDataChannel(dc)
             if (dc.state() == DataChannel.State.OPEN) events.onDataOpen()
@@ -232,7 +271,8 @@ class WebRtcCall(
 
     companion object {
         private const val STREAM_ID = "cowatch"
-        private const val TAG = "WebRtcCall"
+        private const val SYNC_LABEL = "cowatch"
+        private const val FILE_LABEL = "cowatch-file"
     }
 }
 

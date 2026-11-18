@@ -22,6 +22,15 @@ import com.cowatch.app.settings.AppSettings
 import com.cowatch.app.settings.Feature
 import com.cowatch.app.settings.SettingsRepository
 import com.cowatch.app.signaling.PeerJsPayloads
+import com.cowatch.app.stream.ContentRangeSource
+import com.cowatch.app.stream.PeerFileClient
+import com.cowatch.app.stream.PeerFileServer
+import com.cowatch.app.stream.PeerStreamDataSource
+import com.cowatch.app.stream.RoutingDataSourceFactory
+import androidx.annotation.OptIn
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import com.cowatch.app.signaling.PeerJsSignaling
 import com.cowatch.app.signaling.PeerJsSignaling.SignalType
 import com.cowatch.app.sync.DriftCorrector
@@ -60,12 +69,36 @@ class SessionViewModel(app: Application) : AndroidViewModel(app) {
     private val _localVideo = MutableStateFlow<VideoTrack?>(null)
     val localVideo: StateFlow<VideoTrack?> = _localVideo.asStateFlow()
 
-    val player: ExoPlayer = ExoPlayer.Builder(app).build().apply {
-        addListener(object : Player.Listener {
-            override fun onIsPlayingChanged(isPlaying: Boolean) = refreshPlayback()
-            override fun onPlaybackStateChanged(playbackState: Int) = refreshPlayback()
-        })
-    }
+    // Streams videos to/from the partner over the call (see the stream package).
+    private val fileClient = PeerFileClient { text -> call?.sendFileText(text) == true }
+    private val fileServer = PeerFileServer(
+        send = { buf -> call?.sendFileBinary(buf) == true },
+        bufferedAmount = { call?.fileBufferedAmount() ?: 0 },
+    )
+    /** The partner's video we're currently streaming: streamId -> size. */
+    @Volatile private var remoteStream: Pair<String, Long>? = null
+    /** What we last opened ourselves, re-sent if the sync channel (re)opens. */
+    private var ownLoad: SyncMessage.Load? = null
+
+    @OptIn(UnstableApi::class)
+    val player: ExoPlayer = ExoPlayer.Builder(app)
+        .setMediaSourceFactory(
+            DefaultMediaSourceFactory(
+                RoutingDataSourceFactory(app) { streamId ->
+                    remoteStream?.takeIf { it.first == streamId }?.let { (id, size) -> PeerStreamDataSource(fileClient, id, size) }
+                }
+            )
+        )
+        .build().apply {
+            addListener(object : Player.Listener {
+                override fun onIsPlayingChanged(isPlaying: Boolean) = refreshPlayback()
+                override fun onPlaybackStateChanged(playbackState: Int) = refreshPlayback()
+                override fun onPlayerError(error: PlaybackException) {
+                    val cause = generateSequence<Throwable>(error) { it.cause }.mapNotNull { it.message }.lastOrNull()
+                    toast("Can't play this video" + (cause?.let { ": $it" } ?: ""))
+                }
+            })
+        }
 
     private var signaling: PeerJsSignaling? = null
     private var call: WebRtcCall? = null
@@ -227,6 +260,11 @@ class SessionViewModel(app: Application) : AndroidViewModel(app) {
                 override fun onConnectionChange(state: PeerConnection.PeerConnectionState) = onMain { this@SessionViewModel.onConnectionChange(state) }
                 override fun onDataOpen() = onMain { this@SessionViewModel.onDataOpen() }
                 override fun onDataMessage(text: String) = onMain { SyncMessage.decode(text)?.let(::onPeerMessage) }
+                override fun onFileMessage(buffer: java.nio.ByteBuffer, binary: Boolean) {
+                    // Off the main thread on purpose: these are video bytes.
+                    if (binary) fileClient.onResponse(buffer)
+                    else fileServer.onRequest(Charsets.UTF_8.decode(buffer).toString())
+                }
                 override fun onRemoteVideo(track: VideoTrack?) {
                     _remoteVideo.value = track
                     _state.update { it.copy(hasRemoteVideo = track != null) }
@@ -262,11 +300,12 @@ class SessionViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun onDataOpen() {
+        _state.update { it.copy(syncReady = true) }
         send(SyncMessage.Hello(myName(), Feature.entries.filter { s.enabled(it) }.map { it.name }))
         sendMediaState()
-        val st = _state.value
-        if (st.isHost && st.movieTitle != null && s.enabled(Feature.PLAYBACK_SYNC)) {
-            send(SyncMessage.Load(st.movieTitle, currentUrl()?.takeIf { s.enabled(Feature.SHARE_LINKS) }))
+        val load = ownLoad
+        if (load != null && _state.value.movieTitle == load.title && s.enabled(Feature.PLAYBACK_SYNC)) {
+            send(load)
             send(SyncMessage.State(player.currentPosition, player.playWhenReady, System.currentTimeMillis()))
         }
     }
@@ -280,13 +319,20 @@ class SessionViewModel(app: Application) : AndroidViewModel(app) {
             is SyncMessage.Hello -> _state.update { it.copy(partnerName = msg.name.ifBlank { it.partnerName }) }
             is SyncMessage.MediaState -> _state.update { it.copy(partnerCameraOn = msg.cameraOn, partnerMicOn = msg.micOn) }
             is SyncMessage.Load -> if (sync) {
-                if (msg.url != null && s.enabled(Feature.SHARE_LINKS)) {
-                    loadInternal(Uri.parse(msg.url), msg.title, broadcast = false)
-                    toast("$partner opened “${msg.title}”")
-                } else if (_state.value.movieTitle != msg.title) {
-                    _state.update { it.copy(partnerLocalFile = msg.title) }
+                when {
+                    msg.url != null && s.enabled(Feature.SHARE_LINKS) -> {
+                        loadInternal(Uri.parse(msg.url), msg.title, broadcast = false)
+                        toast("$partner opened “${msg.title}”")
+                    }
+                    msg.streamId != null && msg.size != null && s.enabled(Feature.STREAM_FILES) -> {
+                        remoteStream = msg.streamId to msg.size
+                        loadInternal(PeerStreamDataSource.uriFor(msg.streamId, msg.title), msg.title, broadcast = false)
+                        toast("Playing “${msg.title}” from $partner's phone")
+                    }
+                    _state.value.movieTitle != msg.title -> _state.update { it.copy(partnerLocalFile = msg.title) }
                 }
             }
+            SyncMessage.Unload -> if (sync) { unloadInternal(); toast("$partner closed the video") }
             is SyncMessage.Play -> if (sync) {
                 seekIfFar(msg.positionMs); player.play(); toast("$partner pressed play")
             }
@@ -327,6 +373,21 @@ class SessionViewModel(app: Application) : AndroidViewModel(app) {
         loadInternal(uri, title, broadcast = true, isLocalFile = isLocalFile)
     }
 
+    /** "Stop video": back to the movie picker, on both phones. */
+    fun closeMovie() {
+        unloadInternal()
+        syncSend(SyncMessage.Unload)
+    }
+
+    private fun unloadInternal() {
+        player.stop()
+        player.clearMediaItems()
+        fileServer.stop()
+        remoteStream = null
+        ownLoad = null
+        _state.update { it.copy(movieTitle = null, partnerLocalFile = null, positionMs = 0, durationMs = 0, isPlaying = false) }
+    }
+
     private fun loadInternal(uri: Uri, title: String, broadcast: Boolean, isLocalFile: Boolean = false) {
         player.setMediaItem(
             MediaItem.Builder().setUri(uri)
@@ -336,14 +397,28 @@ class SessionViewModel(app: Application) : AndroidViewModel(app) {
         player.prepare()
         _state.update { it.copy(movieTitle = title, partnerLocalFile = null) }
         applyMovieVolume()
-        if (broadcast && s.enabled(Feature.PLAYBACK_SYNC)) {
-            val shareUrl = if (!isLocalFile && s.enabled(Feature.SHARE_LINKS)) uri.toString() else null
-            send(SyncMessage.Load(title, shareUrl))
+        if (PeerStreamDataSource.streamIdOf(uri) == null) remoteStream = null
+        fileServer.stop() // whatever we were sharing before is no longer playing
+        if (!broadcast) { ownLoad = null; return }
+        if (!s.enabled(Feature.PLAYBACK_SYNC)) { ownLoad = null; return }
+        val load = when {
+            !isLocalFile -> SyncMessage.Load(title, uri.toString().takeIf { s.enabled(Feature.SHARE_LINKS) })
+            s.enabled(Feature.STREAM_FILES) -> {
+                val source = ContentRangeSource.open(getApplication(), uri)
+                if (source != null) {
+                    val streamId = PeerJsPayloads.newConnectionId().removePrefix("mc_")
+                    fileServer.share(streamId, source)
+                    SyncMessage.Load(title, null, streamId, source.size)
+                } else {
+                    toast("Couldn't share this file; your partner will need their own copy")
+                    SyncMessage.Load(title, null)
+                }
+            }
+            else -> SyncMessage.Load(title, null)
         }
+        ownLoad = load
+        send(load)
     }
-
-    private fun currentUrl(): String? = player.currentMediaItem?.localConfiguration?.uri?.toString()
-        ?.takeIf { it.startsWith("http") }
 
     fun togglePlay() {
         if (player.playWhenReady) {
@@ -503,6 +578,9 @@ class SessionViewModel(app: Application) : AndroidViewModel(app) {
         // No LEAVE message: the public PeerJS server disconnects clients that send one. Closing is enough.
         signaling?.close(); signaling = null
         call?.close(); call = null
+        fileClient.failAll()
+        fileServer.stop()
+        _state.update { it.copy(syncReady = false) }
         partnerPeerId = null
         connectionId = PeerJsPayloads.newConnectionId()
         applyAudioRouting(false)
@@ -517,6 +595,7 @@ class SessionViewModel(app: Application) : AndroidViewModel(app) {
         send(SyncMessage.Bye)
         teardown()
         tickerJob?.cancel()
+        fileServer.close()
         player.release()
     }
 

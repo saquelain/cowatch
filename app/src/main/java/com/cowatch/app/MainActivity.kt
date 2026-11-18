@@ -163,6 +163,7 @@ class MainActivity : ComponentActivity() {
                         onOpenLink = { url -> vm.openMovie(Uri.parse(url), titleFromUrl(url), isLocalFile = false) },
                         onPickFile = { pickFile.launch(arrayOf("video/*")) },
                         onDismissPartnerFile = vm::dismissPartnerFile,
+                        onCloseMovie = vm::closeMovie,
                         onToggleMic = vm::toggleMic,
                         onToggleCamera = vm::toggleCamera,
                         onSwitchCamera = vm::switchCamera,
