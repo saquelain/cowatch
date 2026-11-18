@@ -1,0 +1,7 @@
+<resources>
+    <style name="Theme.CoWatch" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#FF140F1F</item>
+        <item name="android:statusBarColor">#FF140F1F</item>
+        <item name="android:navigationBarColor">#FF140F1F</item>
+    </style>
+</resources>
