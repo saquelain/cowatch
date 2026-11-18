@@ -21,6 +21,7 @@ import com.cowatch.app.pairing.PairingCode
 import com.cowatch.app.settings.AppSettings
 import com.cowatch.app.settings.Feature
 import com.cowatch.app.settings.SettingsRepository
+import com.cowatch.app.signaling.PeerJsPayloads
 import com.cowatch.app.signaling.PeerJsSignaling
 import com.cowatch.app.signaling.PeerJsSignaling.SignalType
 import com.cowatch.app.sync.DriftCorrector
@@ -37,10 +38,6 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.int
-import kotlinx.serialization.json.jsonPrimitive
 import org.webrtc.IceCandidate
 import org.webrtc.PeerConnection
 import org.webrtc.SessionDescription
@@ -73,6 +70,7 @@ class SessionViewModel(app: Application) : AndroidViewModel(app) {
     private var signaling: PeerJsSignaling? = null
     private var call: WebRtcCall? = null
     private var partnerPeerId: String? = null
+    private var connectionId: String = PeerJsPayloads.newConnectionId()
     private var sessionJob: Job? = null
     private var tickerJob: Job? = null
     private var ids = 0L
@@ -159,10 +157,7 @@ class SessionViewModel(app: Application) : AndroidViewModel(app) {
             val c = newCall()
             val offer = runCatching { c.createOffer() }.getOrElse { endSession("Couldn't start the call: ${it.message}"); return@launch }
             _state.update { it.copy(phase = Phase.CONNECTING) }
-            signaling?.send(SignalType.OFFER, target, buildJsonObject {
-                put("sdp", JsonPrimitive(offer.description))
-                put("name", JsonPrimitive(myName()))
-            })
+            signaling?.send(SignalType.OFFER, target, PeerJsPayloads.sdp("offer", offer.description, connectionId, myName()))
         }
     }
 
@@ -171,25 +166,32 @@ class SessionViewModel(app: Application) : AndroidViewModel(app) {
             SignalType.OFFER -> {
                 // One-time code: the first partner to arrive gets in, nobody else.
                 if (!_state.value.isHost || partnerPeerId != null) return
+                val offer = PeerJsPayloads.readSdp(payload) ?: return
                 partnerPeerId = src
-                val sdp = payload["sdp"]?.jsonPrimitive?.content ?: return
-                val name = payload["name"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
+                PeerJsPayloads.connectionId(payload)?.let { connectionId = it }
+                val sdp = offer.sdp
+                val name = offer.name
                 _state.update { it.copy(phase = Phase.CONNECTING, partnerName = name ?: it.partnerName) }
+                sessionJob?.cancel()
+                sessionJob = viewModelScope.launch {
+                    delay(30_000)
+                    if (_state.value.phase == Phase.CONNECTING) {
+                        endSession("Couldn't connect to ${_state.value.partnerName}. If you're on different networks, a TURN server (Settings) may help.")
+                    }
+                }
                 viewModelScope.launch {
                     val c = newCall()
                     val answer = runCatching {
                         c.acceptOffer(SessionDescription(SessionDescription.Type.OFFER, sdp))
                     }.getOrElse { endSession("Couldn't connect: ${it.message}"); return@launch }
-                    signaling?.send(SignalType.ANSWER, src, buildJsonObject {
-                        put("sdp", JsonPrimitive(answer.description))
-                        put("name", JsonPrimitive(myName()))
-                    })
+                    signaling?.send(SignalType.ANSWER, src, PeerJsPayloads.sdp("answer", answer.description, connectionId, myName()))
                 }
             }
             SignalType.ANSWER -> {
                 if (src != partnerPeerId) return
-                val sdp = payload["sdp"]?.jsonPrimitive?.content ?: return
-                payload["name"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }?.let { n ->
+                val answer = PeerJsPayloads.readSdp(payload) ?: return
+                val sdp = answer.sdp
+                answer.name?.let { n ->
                     _state.update { it.copy(partnerName = n) }
                 }
                 viewModelScope.launch {
@@ -199,10 +201,8 @@ class SessionViewModel(app: Application) : AndroidViewModel(app) {
             }
             SignalType.CANDIDATE -> {
                 if (src != partnerPeerId) return
-                val cand = payload["candidate"]?.jsonPrimitive?.content ?: return
-                val mid = payload["sdpMid"]?.jsonPrimitive?.content ?: ""
-                val idx = payload["sdpMLineIndex"]?.jsonPrimitive?.int ?: 0
-                call?.addRemoteCandidate(IceCandidate(mid, idx, cand))
+                val c = PeerJsPayloads.readCandidate(payload) ?: return
+                call?.addRemoteCandidate(IceCandidate(c.sdpMid, c.sdpMLineIndex, c.candidate))
             }
             SignalType.LEAVE -> if (src == partnerPeerId && _state.value.phase != Phase.CONNECTED) {
                 endSession("${_state.value.partnerName} left.")
@@ -219,11 +219,10 @@ class SessionViewModel(app: Application) : AndroidViewModel(app) {
             events = object : WebRtcCall.Events {
                 override fun onIceCandidate(candidate: IceCandidate) {
                     val dst = partnerPeerId ?: return
-                    signaling?.send(SignalType.CANDIDATE, dst, buildJsonObject {
-                        put("candidate", JsonPrimitive(candidate.sdp))
-                        put("sdpMid", JsonPrimitive(candidate.sdpMid))
-                        put("sdpMLineIndex", JsonPrimitive(candidate.sdpMLineIndex))
-                    })
+                    signaling?.send(
+                        SignalType.CANDIDATE, dst,
+                        PeerJsPayloads.candidate(PeerJsPayloads.Candidate(candidate.sdp, candidate.sdpMid ?: "", candidate.sdpMLineIndex), connectionId),
+                    )
                 }
                 override fun onConnectionChange(state: PeerConnection.PeerConnectionState) = onMain { this@SessionViewModel.onConnectionChange(state) }
                 override fun onDataOpen() = onMain { this@SessionViewModel.onDataOpen() }
@@ -501,10 +500,11 @@ class SessionViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun teardown() {
         sessionJob?.cancel(); sessionJob = null
-        partnerPeerId?.let { dst -> signaling?.send(SignalType.LEAVE, dst, JsonObject(emptyMap())) }
+        // No LEAVE message: the public PeerJS server disconnects clients that send one. Closing is enough.
         signaling?.close(); signaling = null
         call?.close(); call = null
         partnerPeerId = null
+        connectionId = PeerJsPayloads.newConnectionId()
         applyAudioRouting(false)
         applyMovieVolume()
     }

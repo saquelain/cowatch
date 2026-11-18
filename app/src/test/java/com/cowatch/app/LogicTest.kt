@@ -3,6 +3,7 @@ package com.cowatch.app
 import com.cowatch.app.pairing.PairingCode
 import com.cowatch.app.settings.AppSettings
 import com.cowatch.app.settings.Feature
+import com.cowatch.app.signaling.PeerJsPayloads
 import com.cowatch.app.signaling.PeerJsSignaling
 import com.cowatch.app.sync.DriftCorrector
 import com.cowatch.app.sync.SyncMessage
@@ -136,5 +137,27 @@ class PeerJsSignalingTest {
         sig.handle("""{"type":"ERROR","payload":{"msg":"bad key"}}""")
         sig.handle("garbage")
         assertEquals(listOf("open", "OFFER:guest:\"v=0\"", "gone:host", "taken", "err:bad key"), events)
+    }
+}
+
+class PeerJsPayloadsTest {
+    /** The public server kicks clients whose payloads don't look like the official PeerJS client's. */
+    @Test fun sdpUsesPeerJsShape() {
+        val p = PeerJsPayloads.sdp("offer", "v=0", "mc_1", "Sam")
+        assertEquals("""{"sdp":{"type":"offer","sdp":"v=0"},"type":"media","connectionId":"mc_1","metadata":{"name":"Sam"}}""", p.toString())
+        assertEquals(PeerJsPayloads.Sdp("offer", "v=0", "Sam"), PeerJsPayloads.readSdp(p))
+        assertEquals("mc_1", PeerJsPayloads.connectionId(p))
+    }
+
+    @Test fun candidateRoundTrips() {
+        val c = PeerJsPayloads.Candidate("candidate:1", "0", 1)
+        val p = PeerJsPayloads.candidate(c, "mc_1")
+        assertTrue(p["candidate"] is JsonObject)
+        assertEquals(c, PeerJsPayloads.readCandidate(p))
+    }
+
+    @Test fun oldFlatFormatIsRejected() {
+        val flat = kotlinx.serialization.json.buildJsonObject { put("sdp", kotlinx.serialization.json.JsonPrimitive("v=0")) }
+        assertNull(PeerJsPayloads.readSdp(flat))
     }
 }
